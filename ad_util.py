@@ -32,10 +32,6 @@ from functools import reduce
 
 
 
-
-# https://gist.github.com/m-x-k/0876d2f74f398db36800074e26bec866
-
-
 class AdBreaker:
 
     def __init__(self, host=None, target_ip=None, username=None, password=None, ssl=False, sslprotocol=None, port=None, delay=0, jitter=0, paged_size=500, logger=logging.Logger('AdBreaker'), raw=False, kerberos=False, 
