@@ -317,3 +317,20 @@ LOOKUPS = {
 }
 
 
+MS_OIDS = {
+    'microsoftCaVersion' : '1.3.6.1.4.1.311.21.1',
+    'EFS_CRYPTO': '1.3.6.1.4.1.311.10.3.4',
+    'APPLICATION_CERT_POLICIES': '1.3.6.1.4.1.311.21.10',
+    'sMIMECapabilities': '1.2.840.113549.1.9.15',
+    'NT_PRINCIPAL_NAME': '1.3.6.1.4.1.311.20.2.3',
+    'NT_PRINCIPAL_SID': '1.3.6.1.4.1.311.25.2',
+    'NTDS_CA_SECURITY_EXT': '1.3.6.1.4.1.311.25.2.1',
+    #'RC2-CBC': '1.2.840.113549.3.2',
+    #'RC4': '1.2.840.113549.3.4',
+    #'DESCBC': '1.3.14.3.2.7',
+    #'DES-EDE3-CBC': '1.2.840.113549.3.7',
+    #'clientAuth': '1.3.6.1.5.5.7.3.2',
+    #'emailProtection': '1.3.6.1.5.5.7.3.4',
+    #'encryptingFileSystem': '1.3.6.1.4.1.311.10.3.4'
+}
+
