@@ -8,8 +8,8 @@ from hashlib import sha256
 import datetime
 import uuid
 from constants import MS_OIDS, DEFAULT_KEY_USAGE, DEFAULT_SMIME_CAPABILITIES
-from pyasn1.type.univ import Sequence, Integer, OctetString, ObjectIdentifier, Set, SetOf, SequenceOf
-from pyasn1.type.namedtype import NamedType, OptionalNamedType, NamedTypes, DefaultedNamedType
+from pyasn1.type.univ import Sequence, Integer, OctetString, ObjectIdentifier
+from pyasn1.type.namedtype import NamedType, NamedTypes
 from pyasn1.type.tag import Tag, tagClassContext, tagFormatSimple
 from pyasn1.codec.der.encoder import encode
 from pyasn1.codec.der.decoder import decode
@@ -85,7 +85,7 @@ class ObjectIdentifierSeq(Sequence):
 #    2:d=1  hl=2 l=  62 cons: cont [ 0 ]
 #    4:d=2  hl=2 l=  10 prim: OBJECT            :Microsoft NTDS AD objectSid
 #   16:d=2  hl=2 l=  48 cons: cont [ 0 ]
-#   18:d=3  hl=2 l=  46 prim: OCTET STRING      :S-1-5-21-1954401763-2568157779-1971089446-1113
+#   18:d=3  hl=2 l=  46 prim: OCTET STRING      :string
 
 #[U] SEQUENCE
 #[C] 0x0
@@ -107,19 +107,20 @@ class ObjectIdentifierSeq(Sequence):
 
 
 # this is not exactly correct since I cant figure out how to tag both components collectively, but I think a single byte change fixes it???
-
 class UserSid(Sequence):
     componentType = NamedTypes(
         _sequence_component('id', 0, ObjectIdentifier(value='1.3.6.1.4.1.311.25.2.1')),
         _sequence_component('value', 0, OctetString())
     )
 
+
+# cant figure out how to encode this properly so Im cheating
 def build_user_sid(sid: str) -> bytes:
     sidobj = UserSid()
     sidobj['value'] = sid
     objbytes = encode(sidobj)
-    # cant figure out how to encode this properly so Im cheating, 12 is length of ObjectIdentifier plus length of encoded sid
     enc_sid_len = len(encode(OctetString(value=sid).subtype(explicitTag=Tag(tagClassContext, tagFormatSimple, 0))))
+    # change length of first component object to 12 (length of ObjectIdentifier) plus length of encoded sid
     return objbytes[0:3] + bytes([enc_sid_len+12]) + objbytes[4:]
 
 
