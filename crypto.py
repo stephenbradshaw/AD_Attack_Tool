@@ -7,8 +7,8 @@ from cryptography.x509.oid import NameOID
 from hashlib import sha256
 import datetime
 import uuid
-from constants import MS_OIDS
-from pyasn1.type.univ import Sequence, Integer, OctetString, ObjectIdentifier
+from constants import MS_OIDS, DEFAULT_KEY_USAGE, DEFAULT_SMIME_CAPABILITIES
+from pyasn1.type.univ import Sequence, Integer, OctetString, ObjectIdentifier, Set, SetOf, SequenceOf
 from pyasn1.type.namedtype import NamedType, OptionalNamedType, NamedTypes, DefaultedNamedType
 from pyasn1.type.tag import Tag, tagClassContext, tagFormatSimple
 from pyasn1.codec.der.encoder import encode
@@ -60,6 +60,26 @@ def oid_lookup(oid: str) -> str:
     all = {**base, **{MS_OIDS[a]: a for a in MS_OIDS}} 
     return all[oid] if oid in all else oid
 
+def name_to_oid(oid: str) -> str:
+    base = {b[1]: b[0].dotted_string for a in [d for d in dir(x509.oid) if d.endswith('OID')] for b in [[getattr(getattr(x509.oid, a), c), c] for c in dir(getattr(x509.oid, a)) if not c.startswith('__')]}
+    all = {**base, **MS_OIDS} 
+    return all[oid] if oid in all else oid
+
+
+
+class ObjectIdentifierInt(Sequence):
+    componentType = NamedTypes(
+        NamedType('id', ObjectIdentifier()),
+        NamedType('no', Integer()),
+    )
+
+
+class ObjectIdentifierSeq(Sequence):
+    componentType = NamedTypes(
+        NamedType('id', ObjectIdentifier())
+    )
+
+
 
 #    0:d=0  hl=2 l=  64 cons: SEQUENCE
 #    2:d=1  hl=2 l=  62 cons: cont [ 0 ]
@@ -78,43 +98,58 @@ def oid_lookup(oid: str) -> str:
      #       value      octet string }
 
 
-class Sid(Sequence):
-    componentType = NamedTypes(
-        _sequence_component("value", 0, OctetString())
-    )
+
+#[U] SEQUENCE
+#  [C] 0x0
+#    [U] OBJECT: 1.3.6.1.4.1.311.25.2.1
+#    [C] 0x0
+#      [U] OCTET STRING: 0xb''
 
 
+# this is not exactly correct since I cant figure out how to tag both components collectively, but I think a single byte change fixes it???
 
 class UserSid(Sequence):
     componentType = NamedTypes(
-        _sequence_component("typeid", 0, ObjectIdentifier()),
-        _sequence_component("sid", 0, OctetString())
+        _sequence_component('id', 0, ObjectIdentifier(value='1.3.6.1.4.1.311.25.2.1')),
+        _sequence_component('value', 0, OctetString())
     )
 
+def build_user_sid(sid: str) -> bytes:
+    sidobj = UserSid()
+    sidobj['value'] = sid
+    objbytes = encode(sidobj)
+    # cant figure out how to encode this properly so Im cheating
+    return objbytes[0:3] + bytes([62]) + objbytes[4:]
 
 
 
-#    0:d=0  hl=2 l=   7 cons: SEQUENCE
-#    2:d=1  hl=2 l=   1 prim: INTEGER           :7B
-#    5:d=1  hl=2 l=   2 prim: cont [ 0 ]
+def build_smime_capatilities(capabilities: list) -> bytes:
+    seq = Sequence()
+    for ind in range(0, len(capabilities)):
+        oid_data = capabilities[ind]
+        if len(oid_data) == 2:
+            oid = ObjectIdentifierInt()
+            oid['id'] = oid_data[0]
+            oid['no'] = oid_data[1]
+        else:
+            oid = ObjectIdentifierSeq()
+            oid['id'] = oid_data[0]
+        seq.setComponentByPosition(ind, oid)
+    return encode(seq)
 
 
+def build_app_policies_extension(oids: list) -> bytes:
+    seq = Sequence()
+    for ind in range(0, len(oids)):
+        oid = ObjectIdentifierSeq()
+        oid['id'] = oids[ind]
+        seq.setComponentByPosition(ind, oid)
+    return encode(seq)
 
 
-
-
-
-#[U] SEQUENCE
-#    [U] SEQUENCE
-#        [U] OBJECT: 1.3.6.1.5.5.7.3.2
-#    [U] SEQUENCE
-#        [U] OBJECT: 1.3.6.1.5.5.7.3.4
-#    [U] SEQUENCE
-#        [U] OBJECT: 1.3.6.1.4.1.311.10.3.4
-
-
-
-
+def build_key_usage(key_names):
+    oider = lambda x: getattr(x509.oid.ExtendedKeyUsageOID, x) if x in dir(x509.oid.ExtendedKeyUsageOID) else x509.ObjectIdentifier(name_to_oid(x))
+    return [oider(a) for a in key_names]
 
 
 def generate_ca_certificate(subject, private_key, exp=365*10):
@@ -159,7 +194,10 @@ def generate_ca_certificate(subject, private_key, exp=365*10):
     return certificate
 
 
-def generate_client_certificate(subject, client_private_key, signing_private_key, signing_ca_cert=None, issuer_name: str=None,  exp: int=365, verify: bool=True, config_naming: str='', userSid: str='', ca_name: str='', upn: str='', mail: str='', template_id: str=''):
+def generate_client_certificate(subject, client_private_key, signing_private_key, signing_ca_cert=None, issuer_name: str=None,  
+                                exp: int=365, verify: bool=True, config_naming: str='', userSid: str='', ca_name: str='', 
+                                upn: str='', mail: str='', template_id: str='', key_usage: list=DEFAULT_KEY_USAGE, 
+                                smime_capabilities: list=DEFAULT_SMIME_CAPABILITIES):
     one_day = datetime.timedelta(1, 0, 0)
     public_key = client_private_key.public_key()
     builder = x509.CertificateBuilder()
@@ -190,11 +228,7 @@ def generate_client_certificate(subject, client_private_key, signing_private_key
 
     # TLS Web Client Authentication, E-mail Protection, Microsoft Encrypted File System
     builder = builder.add_extension(
-        x509.ExtendedKeyUsage([
-            x509.oid.ExtendedKeyUsageOID.CLIENT_AUTH,
-            x509.oid.ExtendedKeyUsageOID.EMAIL_PROTECTION,
-            x509.ObjectIdentifier(MS_OIDS['EFS_CRYPTO'])
-        ]), 
+        x509.ExtendedKeyUsage(build_key_usage(key_usage)), 
         critical=False
     )
 
@@ -204,37 +238,18 @@ def generate_client_certificate(subject, client_private_key, signing_private_key
                       crl_sign=False, encipher_only=False, decipher_only=False), critical=True
     )
 
-
-    #[U] SEQUENCE
-    #    [U] SEQUENCE
-    #        [U] OBJECT: 1.3.6.1.5.5.7.3.2
-    #    [U] SEQUENCE
-    #        [U] OBJECT: 1.3.6.1.5.5.7.3.4
-    #    [U] SEQUENCE
-    #        [U] OBJECT: 1.3.6.1.4.1.311.10.3.4
+    app_cert_policies = [name_to_oid(a) for a in key_usage]
 
     builder = builder.add_extension(
         x509.UnrecognizedExtension(x509.ObjectIdentifier(MS_OIDS['APPLICATION_CERT_POLICIES']), # Microsoft Application Policies Extension
-                                   b'0&0\n\x06\x08+\x06\x01\x05\x05\x07\x03\x020\n\x06\x08+\x06\x01\x05\x05\x07\x03\x040\x0c\x06\n+\x06\x01\x04\x01\x827\n\x03\x04'), 
+                                   build_app_policies_extension(app_cert_policies)), 
                                    critical=False 
     )
 
 
-    #[U] SEQUENCE
-    #[U] SEQUENCE
-    #    [U] OBJECT: 1.2.840.113549.3.2
-    #    [U] INTEGER: 128
-    #[U] SEQUENCE
-    #    [U] OBJECT: 1.2.840.113549.3.4
-    #    [U] INTEGER: 128
-    #[U] SEQUENCE
-    #    [U] OBJECT: 1.3.14.3.2.7
-    #[U] SEQUENCE
-    #    [U] OBJECT: 1.2.840.113549.3.7
-
     builder = builder.add_extension(
         x509.UnrecognizedExtension(x509.ObjectIdentifier(MS_OIDS['sMIMECapabilities']), # S/MIME Capabilities
-                                   b'050\x0e\x06\x08*\x86H\x86\xf7\r\x03\x02\x02\x02\x00\x800\x0e\x06\x08*\x86H\x86\xf7\r\x03\x04\x02\x02\x00\x800\x07\x06\x05+\x0e\x03\x02\x070\n\x06\x08*\x86H\x86\xf7\r\x03\x07'), 
+                                   build_smime_capatilities(smime_capabilities)), 
                                    critical=False 
     )
 
@@ -279,19 +294,10 @@ def generate_client_certificate(subject, client_private_key, signing_private_key
         critical=False
     )
 
-
-    #[U] SEQUENCE
-    #[C] 0x0
-    #    [U] OBJECT: 1.3.6.1.4.1.311.25.2.1
-    #    [C] 0x0
-    #    [U] OCTET STRING: 0xb'' <-SID as binary string here
-
-
-
-
     builder = builder.add_extension(
         x509.UnrecognizedExtension(x509.ObjectIdentifier(MS_OIDS['userSID']),
-                                   b'0' + chr(len(userSid) + 18).encode() + b'\xa0>\x06\n+\x06\x01\x04\x01\x827\x19\x02\x01\xa00\x04.' + f'{userSid}'.encode()), 
+                                   #b'0' + chr(len(userSid) + 18).encode() + b'\xa0>' + b'\x06\n+\x06\x01\x04\x01\x827\x19\x02\x01' + b'\xa00' + b'\x04.' + f'{userSid}'.encode()), 
+                                   build_user_sid(userSid),
                                    critical=False 
     )
 

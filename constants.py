@@ -316,8 +316,26 @@ LOOKUPS = {
     'trustType' : {1 : 'DOWNLEVEL', 2: 'UPLEVEL', 3: 'MIT', 4: 'DCE', 5: 'AAD'}
 }
 
+# default app cert policies
+DEFAULT_KEY_USAGE = [
+    'CLIENT_AUTH',
+    'EMAIL_PROTECTION',
+    'EFS_CRYPTO'
+]
+
+DEFAULT_SMIME_CAPABILITIES = [
+    ['1.2.840.113549.3.2', 128],
+    ['1.2.840.113549.3.4', 128],
+    ['1.3.14.3.2.7'], 
+    ['1.2.840.113549.3.7']
+]
+
 
 MS_OIDS = {
+    'RC2_CBC': '1.2.840.113549.3.2',
+    'RC4': '1.2.840.113549.3.4',
+    'DES_CBC': '1.3.14.3.2.7',
+    'DES_EDE3_CBC': '1.2.840.113549.3.7',
     'microsoftCaVersion' : '1.3.6.1.4.1.311.21.1',
     'EFS_CRYPTO': '1.3.6.1.4.1.311.10.3.4',
     'APPLICATION_CERT_POLICIES': '1.3.6.1.4.1.311.21.10',
