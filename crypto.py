@@ -118,8 +118,9 @@ def build_user_sid(sid: str) -> bytes:
     sidobj = UserSid()
     sidobj['value'] = sid
     objbytes = encode(sidobj)
-    # cant figure out how to encode this properly so Im cheating
-    return objbytes[0:3] + bytes([62]) + objbytes[4:]
+    # cant figure out how to encode this properly so Im cheating, 12 is length of ObjectIdentifier plus length of encoded sid
+    enc_sid_len = len(encode(OctetString(value=sid).subtype(explicitTag=Tag(tagClassContext, tagFormatSimple, 0))))
+    return objbytes[0:3] + bytes([enc_sid_len+12]) + objbytes[4:]
 
 
 
@@ -297,7 +298,7 @@ def generate_client_certificate(subject, client_private_key, signing_private_key
     builder = builder.add_extension(
         x509.UnrecognizedExtension(x509.ObjectIdentifier(MS_OIDS['userSID']),
                                    #b'0' + chr(len(userSid) + 18).encode() + b'\xa0>' + b'\x06\n+\x06\x01\x04\x01\x827\x19\x02\x01' + b'\xa00' + b'\x04.' + f'{userSid}'.encode()), 
-                                   build_user_sid(userSid),
+                                   build_user_sid(userSid)),
                                    critical=False 
     )
 
