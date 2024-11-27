@@ -16,14 +16,14 @@ from pyasn1.codec.der.decoder import decode
 
 
 
-def _sequence_component(name, tag_value, type, **subkwargs):
+def _sequence_component(name: str, tag_value: int, type: object, **subkwargs) -> NamedType:
     return NamedType(name, type.subtype(
         explicitTag=Tag(tagClassContext, tagFormatSimple,
                             tag_value),
         **subkwargs))
 
 
-def create_private_key(keysize=2048, exp=65537):
+def create_private_key(keysize: int=2048, exp: int=65537) -> rsa.RSAPrivateKey:
     private_key = rsa.generate_private_key(
         public_exponent=exp,
         key_size=keysize
@@ -31,27 +31,27 @@ def create_private_key(keysize=2048, exp=65537):
     return private_key
 
 
-
-def private_key_bytes(private_key):
+def private_key_bytes(private_key: rsa.RSAPrivateKey) -> bytes:
     return private_key.private_bytes(encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.TraditionalOpenSSL, encryption_algorithm=serialization.NoEncryption())
 
-def public_key_bytes(public_key):
+def public_key_bytes(public_key: rsa.RSAPublicKey) -> bytes:
     return public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.PKCS1)
 
 
-def certificate_bytes(certificate):
+def certificate_bytes(certificate: x509.Certificate) -> bytes:
     return certificate.public_bytes(encoding=serialization.Encoding.PEM,)
 
-def read_pem_certificate(filename):
+
+def read_pem_certificate(filename: str) -> x509.Certificate:
     return x509.load_pem_x509_certificate(data=open(filename, 'rb').read())
 
 
-def read_private_key(key_filename):
+def read_private_key(key_filename: str) -> rsa.RSAPrivateKey:
     return load_pem_private_key(open(key_filename, 'rb').read(), password=None)
 
 
 # not sure this works
-def get_public_key_digest(key):
+def get_public_key_digest(key: rsa.RSAPublicKey) -> bytes:
     return sha256(key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)).digest()
 
 
@@ -78,7 +78,6 @@ class ObjectIdentifierSeq(Sequence):
     componentType = NamedTypes(
         NamedType('id', ObjectIdentifier())
     )
-
 
 
 #    0:d=0  hl=2 l=  64 cons: SEQUENCE
@@ -174,7 +173,7 @@ def build_subject_alternative_names(upn: str, mail: str=None) -> list:
     return sans
 
 
-def build_named_subject(dn: str, mail: str=None):
+def build_named_subject(dn: str, mail: str=None) -> x509.Name:
     l = {'CN': 'COMMON_NAME', 'OU': 'ORGANIZATIONAL_UNIT_NAME', 'DC': 'DOMAIN_COMPONENT'}
     nc = lambda x: x509.NameAttribute(getattr(NameOID, l[x.split('=')[0]]), x.split('=')[1])
     dn_name = [nc(a) for a in dn.split(',')][::-1]
@@ -185,16 +184,12 @@ def build_named_subject(dn: str, mail: str=None):
 
 
 
-def generate_ca_certificate(subject, private_key, exp=365*10):
+def generate_ca_certificate(ca_dn: str, private_key: rsa.RSAPrivateKey, exp: int=365*10) -> x509.Certificate:
     one_day = datetime.timedelta(1, 0, 0)
     public_key = private_key.public_key()
     builder = x509.CertificateBuilder()
-    builder = builder.subject_name(x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, subject)
-    ]))
-    builder = builder.issuer_name(x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, subject),
-    ]))
+    builder = builder.subject_name(build_named_subject(ca_dn))
+    builder = builder.issuer_name(build_named_subject(ca_dn))
     builder = builder.not_valid_before(datetime.datetime.today() - one_day)
     builder = builder.not_valid_after(datetime.datetime.today() + (one_day * exp))
     builder = builder.serial_number(int(uuid.uuid4()))
@@ -222,8 +217,6 @@ def generate_ca_certificate(subject, private_key, exp=365*10):
         backend=default_backend()
     )
 
-
-
     return certificate
 
 
@@ -233,7 +226,7 @@ def generate_client_certificate(dn, client_private_key, signing_private_key, ca_
                                 signing_ca_cert=None, issuer_dn: str=None, exp: int=365, verify: bool=True, config_naming: str='',
                                 mail: str='', template_id: str='', template_major_version: int=None,  
                                 template_minor_version: int=None, key_usage: list=DEFAULT_KEY_USAGE, app_cert_policies: bool=True,
-                                smime_capabilities: list=DEFAULT_SMIME_CAPABILITIES, template_name: str=''):
+                                smime_capabilities: list=DEFAULT_SMIME_CAPABILITIES, template_name: str='') -> x509.Certificate:
     
 
     one_day = datetime.timedelta(1, 0, 0)
