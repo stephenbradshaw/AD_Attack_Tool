@@ -98,7 +98,6 @@ class ObjectIdentifierSeq(Sequence):
      #       value      octet string }
 
 
-
 #[U] SEQUENCE
 #  [C] 0x0
 #    [U] OBJECT: 1.3.6.1.4.1.311.25.2.1
@@ -106,7 +105,8 @@ class ObjectIdentifierSeq(Sequence):
 #      [U] OCTET STRING: 0xb''
 
 
-# this is not exactly correct since I cant figure out how to tag both components collectively, but I think a single byte change fixes it???
+# this is not exactly correct since I cant figure out how to tag both components collectively
+# but byte patching afterwards seems to fix it
 class UserSid(Sequence):
     componentType = NamedTypes(
         _sequence_component('id', 0, ObjectIdentifier(value='1.3.6.1.4.1.311.25.2.1')),
@@ -115,6 +115,7 @@ class UserSid(Sequence):
 
 
 # cant figure out how to encode this properly so Im cheating
+# b'0' + chr(len(userSid) + 18).encode() + b'\xa0>' + b'\x06\n+\x06\x01\x04\x01\x827\x19\x02\x01' + b'\xa00' + b'\x04.' + f'{userSid}'.encode()), 
 def build_user_sid(sid: str) -> bytes:
     sidobj = UserSid()
     sidobj['value'] = sid
@@ -149,9 +150,39 @@ def build_app_policies_extension(oids: list) -> bytes:
     return encode(seq)
 
 
-def build_key_usage(key_names):
+def build_key_usage(key_names: list) -> bytes:
     oider = lambda x: getattr(x509.oid.ExtendedKeyUsageOID, x) if x in dir(x509.oid.ExtendedKeyUsageOID) else x509.ObjectIdentifier(name_to_oid(x))
     return [oider(a) for a in key_names]
+
+def build_template_name(template_name: str) -> bytes:
+    encoded = template_name.encode('utf-16-be')
+    return b'\x1e' + bytes([len(encoded)]) + encoded
+
+
+def build_name(name: str) -> bytes:
+    encoded = f'{name}'.encode()
+    return '\x0c' + bytes([len(encoded)]) + encoded
+
+
+def build_subject_alternative_names(upn: str, mail: str=None) -> list:
+    sans = [
+        x509.OtherName(type_id=x509.ObjectIdentifier(MS_OIDS['NT_PRINCIPAL_NAME']),
+                       value=build_name(upn)),       
+    ]
+    if mail:
+        sans += [x509.RFC822Name(value=f'{mail}')]
+    return sans
+
+
+def build_named_subject(dn: str, mail: str=None):
+    l = {'CN': 'COMMON_NAME', 'OU': 'ORGANIZATIONAL_UNIT_NAME', 'DC': 'DOMAIN_COMPONENT'}
+    nc = lambda x: x509.NameAttribute(getattr(NameOID, l[x.split('=')[0]]), x.split('=')[1])
+    dn_name = [nc(a) for a in dn.split(',')][::-1]
+    if mail:
+        dn_name += [x509.NameAttribute(NameOID.EMAIL_ADDRESS, mail)]
+    return x509.Name(dn_name)
+
+
 
 
 def generate_ca_certificate(subject, private_key, exp=365*10):
@@ -196,39 +227,44 @@ def generate_ca_certificate(subject, private_key, exp=365*10):
     return certificate
 
 
-def generate_client_certificate(subject, client_private_key, signing_private_key, signing_ca_cert=None, issuer_name: str=None,  
-                                exp: int=365, verify: bool=True, config_naming: str='', userSid: str='', ca_name: str='', 
-                                upn: str='', mail: str='', template_id: str='', key_usage: list=DEFAULT_KEY_USAGE, 
-                                smime_capabilities: list=DEFAULT_SMIME_CAPABILITIES):
+
+
+def generate_client_certificate(dn, client_private_key, signing_private_key, ca_name: str, upn: str, userSid: str,
+                                signing_ca_cert=None, issuer_dn: str=None, exp: int=365, verify: bool=True, config_naming: str='',
+                                mail: str='', template_id: str='', template_major_version: int=None,  
+                                template_minor_version: int=None, key_usage: list=DEFAULT_KEY_USAGE, app_cert_policies: bool=True,
+                                smime_capabilities: list=DEFAULT_SMIME_CAPABILITIES, template_name: str=''):
+    
+
     one_day = datetime.timedelta(1, 0, 0)
     public_key = client_private_key.public_key()
     builder = x509.CertificateBuilder()
-    builder = builder.subject_name(x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, subject)
-    ]))
+    builder = builder.subject_name(build_named_subject(dn, mail=mail))
     if signing_ca_cert:
         builder = builder.issuer_name(signing_ca_cert.subject)
-    elif issuer_name:
-        builder = builder.issuer_name(x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, issuer_name),
-        ]))
+    elif issuer_dn:
+        builder = builder.issuer_name(build_named_subject(issuer_dn))
     else:
-        raise Exception()
+        raise Exception('Must provide either signing CA or an issuer name')
+    
+
     builder = builder.not_valid_before(datetime.datetime.today() - one_day)
     builder = builder.not_valid_after(datetime.datetime.today() + (one_day * exp))
     builder = builder.serial_number(int(uuid.uuid4()))
     builder = builder.public_key(public_key)
 
-    builder = builder.add_extension(
-        x509.MSCertificateTemplate(
-            template_id=x509.ObjectIdentifier(template_id),
-            major_version=100,
-            minor_version=4
-        ),
-        critical=False
-    )
 
-    # TLS Web Client Authentication, E-mail Protection, Microsoft Encrypted File System
+    if template_id and template_major_version and template_minor_version:
+        builder = builder.add_extension(
+            x509.MSCertificateTemplate(
+                template_id=x509.ObjectIdentifier(template_id),
+                major_version=template_major_version,
+                minor_version=template_minor_version
+            ),
+            critical=False
+        )
+
+
     builder = builder.add_extension(
         x509.ExtendedKeyUsage(build_key_usage(key_usage)), 
         critical=False
@@ -240,13 +276,21 @@ def generate_client_certificate(subject, client_private_key, signing_private_key
                       crl_sign=False, encipher_only=False, decipher_only=False), critical=True
     )
 
-    app_cert_policies = [name_to_oid(a) for a in key_usage]
+    if app_cert_policies:
+        app_cert_policy_values = [name_to_oid(a) for a in key_usage]
 
-    builder = builder.add_extension(
-        x509.UnrecognizedExtension(x509.ObjectIdentifier(MS_OIDS['APPLICATION_CERT_POLICIES']), # Microsoft Application Policies Extension
-                                   build_app_policies_extension(app_cert_policies)), 
-                                   critical=False 
-    )
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(x509.ObjectIdentifier(MS_OIDS['APPLICATION_CERT_POLICIES']), # Microsoft Application Policies Extension
+                                    build_app_policies_extension(app_cert_policy_values)), 
+                                    critical=False 
+        )
+
+    if template_name:
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(x509.ObjectIdentifier(MS_OIDS['ENROLL_CERTTYPE']),
+                                        build_template_name(template_name)),
+                                        critical=False
+        )
 
 
     builder = builder.add_extension(
@@ -284,26 +328,19 @@ def generate_client_certificate(subject, client_private_key, signing_private_key
         critical=False
     )
 
-
     builder = builder.add_extension(
         x509.SubjectAlternativeName(
-            general_names=[
-                x509.OtherName(type_id=x509.ObjectIdentifier(MS_OIDS['NT_PRINCIPAL_NAME']), value=b'\x0c&' + f'{upn}'.encode()), # upn
-                x509.RFC822Name(value=f'{mail}') # mail
-            ]
+            general_names= build_subject_alternative_names(upn, mail=mail)
             ),
-            
         critical=False
     )
 
     builder = builder.add_extension(
         x509.UnrecognizedExtension(x509.ObjectIdentifier(MS_OIDS['userSID']),
-                                   #b'0' + chr(len(userSid) + 18).encode() + b'\xa0>' + b'\x06\n+\x06\x01\x04\x01\x827\x19\x02\x01' + b'\xa00' + b'\x04.' + f'{userSid}'.encode()), 
-                                   build_user_sid(userSid)),
-                                   critical=False 
+                                build_user_sid(userSid)),
+                                critical=False 
     )
 
-    
     certificate = builder.sign(
         private_key=signing_private_key, algorithm=hashes.SHA256(),
         backend=default_backend()
