@@ -4,7 +4,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
-from hashlib import sha256
+from hashlib import sha1
 import datetime
 import uuid
 from constants import MS_OIDS, DEFAULT_KEY_USAGE, DEFAULT_SMIME_CAPABILITIES
@@ -50,9 +50,8 @@ def read_private_key(key_filename: str) -> rsa.RSAPrivateKey:
     return load_pem_private_key(open(key_filename, 'rb').read(), password=None)
 
 
-# not sure this works
 def get_public_key_digest(key: rsa.RSAPublicKey) -> bytes:
-    return sha256(key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)).digest()
+    return sha1(key.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.PKCS1)).digest()
 
 
 def oid_lookup(oid: str) -> str:
@@ -299,6 +298,8 @@ def generate_client_certificate(dn, client_private_key, signing_private_key, ca_
     builder = builder.add_extension(
         x509.AuthorityKeyIdentifier.from_issuer_public_key(signing_private_key.public_key()), critical=False
     )
+
+    
 
     builder = builder.add_extension(
         x509.CRLDistributionPoints(
